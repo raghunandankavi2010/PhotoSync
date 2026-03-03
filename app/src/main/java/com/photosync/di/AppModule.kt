@@ -44,13 +44,6 @@ object AppModule {
         return context.contentResolver
     }
 
-    // WorkManager
-    @Provides
-    @Singleton
-    fun provideWorkManager(@ApplicationContext context: Context): WorkManager {
-        return WorkManager.getInstance(context)
-    }
-
     // Database
     @Provides
     @Singleton

@@ -13,6 +13,7 @@ import com.photosync.data.datasource.MediaStoreDataSource
 import com.photosync.data.local.dao.SyncMetadataDao
 import com.photosync.data.local.dao.SyncQueueDao
 import com.photosync.data.local.entity.SyncMetadataKeys
+import com.photosync.data.local.entity.toEntity
 import com.photosync.domain.model.SyncStatus
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject

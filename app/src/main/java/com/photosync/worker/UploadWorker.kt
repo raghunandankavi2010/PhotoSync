@@ -1,10 +1,17 @@
 package com.photosync.worker
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import androidx.core.app.NotificationCompat
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import com.photosync.R
 import com.photosync.data.local.dao.SyncQueueDao
 import com.photosync.data.remote.api.SyncApiService
 import com.photosync.data.remote.upload.ChunkedUploader
@@ -19,10 +26,8 @@ import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.io.File
 import java.io.IOException
+import androidx.core.net.toUri
 
-/**
- * Worker for uploading a single photo
- */
 @HiltWorker
 class UploadWorker @AssistedInject constructor(
     @Assisted private val context: Context,
@@ -37,6 +42,8 @@ class UploadWorker @AssistedInject constructor(
     companion object {
         const val KEY_MEDIA_STORE_ID = "media_store_id"
         const val MAX_RETRIES = 3
+        private const val NOTIFICATION_ID = 1
+        private const val CHANNEL_ID = "sync_channel"
     }
 
     override suspend fun doWork(): Result {
@@ -45,38 +52,28 @@ class UploadWorker @AssistedInject constructor(
             return Result.failure()
         }
 
+        setForeground(createForegroundInfo("Starting sync..."))
+
         return withContext(Dispatchers.IO) {
             try {
-                // Get sync item from database
-                val item = syncQueueDao.getById(mediaStoreId)
-                    ?: return@withContext Result.failure()
+                val item = syncQueueDao.getById(mediaStoreId) ?: return@withContext Result.failure()
 
-                // Skip if already synced or duplicate
                 if (item.status == SyncStatus.SYNCED || item.status == SyncStatus.DUPLICATE) {
                     return@withContext Result.success()
                 }
 
-                // Determine upload quality
                 val quality = getUploadQualityUseCase()
-                val uploadUri = if (quality == UploadQuality.COMPRESSED) {
-                    imageRepository.compressImage(Uri.parse(item.localUri))
+                val (uploadUri, fileSize) = if (quality == UploadQuality.COMPRESSED) {
+                    val compressedUri = imageRepository.compressImage(item.localUri.toUri())
+                    val size = context.contentResolver.openAssetFileDescriptor(compressedUri, "r")?.use { it.length } ?: -1L
+                    Pair(compressedUri, size)
                 } else {
-                    Uri.parse(item.localUri)
+                    Pair(item.localUri.toUri(), item.sizeBytes)
                 }
 
-                // Get size of the file to be uploaded
-                val fileSize = if (quality == UploadQuality.COMPRESSED) {
-                    context.contentResolver.openAssetFileDescriptor(uploadUri, "r")?.use {
-                        it.length
-                    } ?: item.sizeBytes
-                } else {
-                    item.sizeBytes
-                }
-
-                // Mark as uploading
                 syncQueueDao.markAsUploading(mediaStoreId)
+                setForeground(createForegroundInfo("Uploading: ${item.displayName}"))
 
-                // Request upload URL
                 val uploadUrlResponse = try {
                     val response = syncApiService.requestUploadUrl(
                         com.photosync.data.remote.api.UploadUrlRequest(
@@ -86,93 +83,89 @@ class UploadWorker @AssistedInject constructor(
                             fileName = item.displayName
                         )
                     )
-
-                    if (!response.isSuccessful) {
-                        throw HttpException(response)
-                    }
-
+                    if (!response.isSuccessful) throw HttpException(response)
                     response.body()
                 } catch (e: Exception) {
-                    syncQueueDao.markAsFailed(mediaStoreId, e.message)
-                    return@withContext if (runAttemptCount < MAX_RETRIES) {
-                        Result.retry()
-                    } else {
-                        Result.failure()
-                    }
+                    handleFailure(mediaStoreId, e.message)
+                    return@withContext Result.retry()
                 }
 
-                // Check if already exists (deduplication)
                 if (uploadUrlResponse?.alreadyExists == true) {
                     syncQueueDao.markAsDuplicate(mediaStoreId)
                     return@withContext Result.success()
                 }
 
-                val uploadUrl = uploadUrlResponse?.uploadUrl
-                    ?: return@withContext Result.failure()
+                val uploadUrl = uploadUrlResponse?.uploadUrl ?: return@withContext handleFailure(mediaStoreId, "Empty upload URL")
 
-                // Perform chunked upload
                 val uploadResult = chunkedUploader.upload(
                     localUri = uploadUri,
                     uploadUrl = uploadUrl,
                     mediaStoreId = mediaStoreId,
                     startByte = item.uploadedBytes
                 ) { uploaded, total ->
-                    // Progress is already persisted in ChunkedUploader
+                    val progress = ((uploaded.toDouble() / total) * 100).toInt()
+                    val notification = createForegroundInfo("Uploading: ${item.displayName}", progress)
+                    setForeground(notification)
                 }
 
-                // Clean up compressed file if it was created
                 if (quality == UploadQuality.COMPRESSED) {
-                    try {
-                        context.contentResolver.delete(uploadUri, null, null)
-                    } catch (e: Exception) {
-                        // Ignore cleanup errors
-                    }
+                    context.contentResolver.delete(uploadUri, null, null)
                 }
 
                 if (uploadResult.isFailure) {
-                    val error = uploadResult.exceptionOrNull()
-                    syncQueueDao.markAsFailed(mediaStoreId, error?.message)
-                    return@withContext if (runAttemptCount < MAX_RETRIES) {
-                        Result.retry()
-                    } else {
-                        Result.failure()
-                    }
+                    return@withContext handleFailure(mediaStoreId, uploadResult.exceptionOrNull()?.message)
                 }
 
-                // Confirm upload completion
-                val serverFileId = uploadUrlResponse?.serverFileId ?: ""
+                val serverFileId = uploadUrlResponse.serverFileId
                 try {
                     val confirmResponse = syncApiService.confirmUpload(serverFileId)
-                    if (!confirmResponse.isSuccessful) {
-                        throw HttpException(confirmResponse)
-                    }
+                    if (!confirmResponse.isSuccessful) throw HttpException(confirmResponse)
                 } catch (e: Exception) {
-                    // Upload succeeded but confirmation failed - will be retried
-                    syncQueueDao.markAsFailed(mediaStoreId, e.message)
-                    return@withContext if (runAttemptCount < MAX_RETRIES) {
-                        Result.retry()
-                    } else {
-                        Result.failure()
-                    }
+                    return@withContext handleFailure(mediaStoreId, "Upload confirmation failed: ${e.message}")
                 }
 
-                // Mark as synced
                 syncQueueDao.markAsSynced(mediaStoreId, serverFileId)
                 Result.success()
-
             } catch (e: Exception) {
-                // Unexpected error
-                try {
-                    syncQueueDao.markAsFailed(mediaStoreId, e.message)
-                } catch (_: Exception) {
-                    // Ignore DB errors
-                }
-                if (runAttemptCount < MAX_RETRIES) {
-                    Result.retry()
-                } else {
-                    Result.failure()
+                handleFailure(mediaStoreId, e.message)
+            }
+        }
+    }
+
+    private suspend fun handleFailure(mediaStoreId: Long, error: String?): Result {
+        syncQueueDao.markAsFailed(mediaStoreId, error)
+        return if (runAttemptCount < MAX_RETRIES) Result.retry() else Result.failure()
+    }
+
+    private fun createForegroundInfo(text: String, progress: Int = -1): ForegroundInfo {
+        createNotificationChannel()
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setContentTitle("PhotoSync")
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setOngoing(true)
+            .apply {
+                if (progress >= 0) {
+                    setProgress(100, progress, false)
                 }
             }
+            .build()
+
+        return ForegroundInfo(NOTIFICATION_ID, notification)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "Syncing"
+            val descriptionText = "Photo synchronization status"
+            val importance = NotificationManager.IMPORTANCE_LOW
+            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+            }
+            val notificationManager: NotificationManager =
+                context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
         }
     }
 }

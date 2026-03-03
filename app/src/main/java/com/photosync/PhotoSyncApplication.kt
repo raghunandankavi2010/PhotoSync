@@ -76,15 +76,17 @@ class PhotoSyncApplication : Application(), Configuration.Provider {
     private fun observeMediaStoreChanges() {
         mediaStoreDataSource.observeMediaStoreChanges()
             .onEach { uri ->
-                // Query the new photo
-                val item = mediaStoreDataSource.queryPhotoByUri(uri)
-                item?.let { photo ->
-                    // Check for duplicates
-                    if (!syncQueueDao.existsByChecksum(photo.checksum)) {
-                        // Add to queue
-                        syncQueueDao.insert(photo.toEntity())
-                        // Schedule upload
-                        scheduleUploadUseCase(photo.mediaStoreId)
+                applicationScope.launch {
+                    // Query the new photo
+                    val item = mediaStoreDataSource.queryPhotoByUri(uri)
+                    item?.let { photo ->
+                        // Check for duplicates
+                        if (!syncQueueDao.existsByChecksum(photo.checksum)) {
+                            // Add to queue
+                            syncQueueDao.insert(photo.toEntity())
+                            // Schedule upload
+                            scheduleUploadUseCase(photo.mediaStoreId)
+                        }
                     }
                 }
             }

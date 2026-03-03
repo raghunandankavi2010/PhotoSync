@@ -37,7 +37,7 @@ class ChunkedUploader @Inject constructor(
         uploadUrl: String,
         mediaStoreId: Long,
         startByte: Long = 0,
-        onProgress: (uploaded: Long, total: Long) -> Unit
+        onProgress: suspend (uploaded: Long, total: Long) -> Unit
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val stream = contentResolver.openInputStream(localUri)

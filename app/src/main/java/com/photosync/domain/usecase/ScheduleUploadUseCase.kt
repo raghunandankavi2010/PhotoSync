@@ -20,7 +20,7 @@ class ScheduleUploadUseCase @Inject constructor(
     @ApplicationContext private val context: Context,
     private val syncRepository: SyncRepository
 ) {
-    operator fun invoke(mediaStoreId: Long) {
+    suspend operator fun invoke(mediaStoreId: Long) {
         val preferences = syncRepository.getSyncPreferences()
 
         val constraints = Constraints.Builder()
@@ -50,7 +50,7 @@ class ScheduleUploadUseCase @Inject constructor(
 class ScheduleSyncItemUploadUseCase @Inject constructor(
     private val scheduleUploadUseCase: ScheduleUploadUseCase
 ) {
-    operator fun invoke(item: SyncItem) {
+    suspend operator fun invoke(item: SyncItem) {
         scheduleUploadUseCase(item.mediaStoreId)
     }
 }
@@ -62,7 +62,7 @@ class ScheduleMultipleUploadsUseCase @Inject constructor(
     @ApplicationContext private val context: Context,
     private val syncRepository: SyncRepository
 ) {
-    operator fun invoke(mediaStoreIds: List<Long>) {
+    suspend operator fun invoke(mediaStoreIds: List<Long>) {
         val preferences = syncRepository.getSyncPreferences()
 
         val constraints = Constraints.Builder()

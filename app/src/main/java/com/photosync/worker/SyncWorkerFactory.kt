@@ -9,6 +9,8 @@ import com.photosync.data.local.dao.SyncQueueDao
 import com.photosync.data.remote.api.SyncApiService
 import com.photosync.data.remote.upload.ChunkedUploader
 import com.photosync.data.datasource.MediaStoreDataSource
+import com.photosync.domain.repository.ImageRepository
+import com.photosync.domain.usecase.GetUploadQualityUseCase
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -23,7 +25,9 @@ class SyncWorkerFactory @Inject constructor(
     private val syncMetadataDao: SyncMetadataDao,
     private val syncApiService: SyncApiService,
     private val chunkedUploader: ChunkedUploader,
-    private val mediaStoreDataSource: MediaStoreDataSource
+    private val mediaStoreDataSource: MediaStoreDataSource,
+    private val imageQualityUseCase: GetUploadQualityUseCase,
+    private val imageRepository: ImageRepository,
 ) : WorkerFactory() {
 
     override fun createWorker(
@@ -38,7 +42,10 @@ class SyncWorkerFactory @Inject constructor(
                     workerParameters,
                     syncQueueDao,
                     syncApiService,
-                    chunkedUploader
+
+                    chunkedUploader,
+                    imageQualityUseCase,
+                    imageRepository = imageRepository
                 )
             }
             MediaScanWorker::class.java.name -> {
